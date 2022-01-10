@@ -6,6 +6,7 @@ import numpy as np
 import camb
 import copy
 import tqdm
+import sacc
 
 parser = argparse.ArgumentParser(description = 'Extract the CMB spectra using SO-MFLike')
 parser.add_argument('--packages_path', '-p', dest = 'packages_path', default = None, type = str, help = 'path to cobaya packages.')
@@ -123,11 +124,7 @@ cmbext = sox.SOCMBExt({
 	}
 })
 
-param_covs = np.identity(7)
-_x = np.loadtxt('covmat', dtype = float)
-for i in range(7):
-	param_covs[i,i] = _x[i]
-del _x
+param_covs = np.loadtxt('covmat', dtype = float)
 
 def calculate_prior(**params):
 	priorvec = -(1e10) * np.ones((7,))
@@ -179,6 +176,9 @@ nuisance_params = copy.deepcopy(takestep(**nuisance_params))
 like = [ ]
 weight = 0
 
+fp_chain = open(args.chain_filename, 'a')
+fp_chain_fg = open(args.fg_chain_filename, 'a')
+
 for step in tqdm.tqdm(range(steps_start, args.steps_end)):
 	spec = cmbext.extract_cmb_spectra(**nuisance_params)
 	
@@ -197,12 +197,11 @@ for step in tqdm.tqdm(range(steps_start, args.steps_end)):
 	if newpost > oldpost or np.exp(newpost - oldpost) > np.random.random():
 		oldpost = newpost
 		
-		with open(args.fg_chain_filename, 'a') as fp:
-			fp.write('{0:3d}\t'.format(weight))
-			write_data = [ *vectorize(**nuisance_params) ]
-			write_line = '\t'.join([ '{:.5e}'.format(x) for x in write_data ]) + '\n'
-			fp.write(write_line)
-			fp.flush()
+		fp_chain_fg.write('{0:5d}\t'.format(weight))
+		write_data = [ *vectorize(**nuisance_params) ]
+		write_line = '\t'.join([ '{:.5e}'.format(x) for x in write_data ]) + '\n'
+		fp_chain_fg.write(write_line)
+		fp_chain_fg.flush()
 		
 		nuisance_params = copy.deepcopy(newparams)
 		
@@ -210,18 +209,82 @@ for step in tqdm.tqdm(range(steps_start, args.steps_end)):
 	
 	like.append(oldpost)
 	
-	with open(args.chain_filename, 'a') as fp:
-		fp.write('{0:5d}\t'.format(step))
-		write_data = [ -2.0 * oldpost, *vectorize(**nuisance_params), *spec['tt'], *spec['te'], *spec['ee'] ]
-		write_line = '\t'.join([ '{:.5e}'.format(x) for x in write_data ]) + '\n'
-		fp.write(write_line)
-		fp.flush()
+	fp_chain.write('{0:5d}\t'.format(step))
+	write_data = [ -2.0 * oldpost, *vectorize(**nuisance_params), *spec['tt'], *spec['te'], *spec['ee'] ]
+	write_line = '\t'.join([ '{:.5e}'.format(x) for x in write_data ]) + '\n'
+	fp_chain.write(write_line)
+	fp_chain.flush()
 	
 	del newparams
 
-with open(args.fg_chain_filename, 'a') as fp:
-	fp.write('{0:3d}\t'.format(weight))
-	write_data = [ *vectorize(**nuisance_params) ]
-	write_line = '\t'.join([ '{:.5e}'.format(x) for x in write_data ]) + '\n'
-	fp.write(write_line)
-	fp.flush()
+fp_chain_fg.write('{0:5d}\t'.format(weight))
+write_data = [ *vectorize(**nuisance_params) ]
+write_line = '\t'.join([ '{:.5e}'.format(x) for x in write_data ]) + '\n'
+fp_chain_fg.write(write_line)
+fp_chain_fg.flush()
+
+fp_chain.close()
+fp_chain_fg.close()
+
+# Write all data to a sacc file.
+# It's still a bit hard-coded, should be optimized in the future in case people want to run multi-experiment extraction codes.
+raw_data = np.loadtxt(args.chain_filename)
+s = sacc.Sacc()
+
+for exp in cmbext.data['experiments'].keys():
+	s.add_tracer("Misc", "{}_cmb_s0".format(exp))
+	s.add_tracer("Misc", "{}_cmb_s2".format(exp))
+	
+	freqs = cmbext.data['experiments'][exp]['frequencies']
+	f = freqs[ len(freqs) // 2 ]
+	i0 = 0
+	data = raw_data[:,9:]
+	
+	# Put the tt spectra in the file.
+	for spec in cmbext.spec_meta:
+		if spec['pol'] == 'tt' and spec['nu1'] == f and spec['nu2'] == f:
+			win = spec['bpw']
+			ws = win.weight.shape[-1]
+			
+			ells = spec['leff']
+			c_ells = np.nanmean(data[:,i0:i0+ws], axis = 0)
+			i0 += ws
+			
+			for ell, c_ell in zip(ells, c_ells):
+				s.add_data_point("cl_00", ("{}_cmb_s0".format(exp), "{}_cmb_s0".format(exp)), c_ell, ell = ell, window = win)
+			
+			break
+	
+	# Put the te spectra in the file.
+	for spec in cmbext.spec_meta:
+		if spec['pol'] == 'te' and spec['nu1'] == f and spec['nu2'] == f:
+			win = spec['bpw']
+			ws = win.weight.shape[-1]
+			
+			ells = spec['leff']
+			c_ells = np.nanmean(data[:,i0:i0+ws], axis = 0)
+			i0 += ws
+			
+			for ell, c_ell in zip(ells, c_ells):
+				s.add_data_point("cl_0e", ("{}_cmb_s0".format(exp), "{}_cmb_s2".format(exp)), c_ell, ell = ell, window = win)
+			
+			break
+	
+	# Put the ee spectra in the file.
+	for spec in cmbext.spec_meta:
+		if spec['pol'] == 'ee' and spec['nu1'] == f and spec['nu2'] == f:
+			win = spec['bpw']
+			ws = win.weight.shape[-1]
+			
+			ells = spec['leff']
+			c_ells = np.nanmean(data[:,i0:i0+ws], axis = 0)
+			i0 += ws
+			
+			for ell, c_ell in zip(ells, c_ells):
+				s.add_data_point("cl_ee", ("{}_cmb_s2".format(exp), "{}_cmb_s2".format(exp)), c_ell, ell = ell, window = win)
+			
+			break
+	
+	cov = np.cov(data[:,:].T)
+	s.add_covariance(cov)
+	s.save_fits('sacc_cmbext.figs', overwrite = True)
