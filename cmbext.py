@@ -287,4 +287,4 @@ for exp in cmbext.data['experiments'].keys():
 	
 	cov = np.cov(data[:,:].T)
 	s.add_covariance(cov)
-	s.save_fits('sacc_cmbext.figs', overwrite = True)
+	s.save_fits('sacc_cmbext.fits', overwrite = True)
